@@ -1,0 +1,235 @@
+---
+title: "2. Modelos mixtos con lme4 II"
+output: html_document
+date: '2022-07-14'
+---
+
+# Ampliando el modelo de intercepto aleatorio
+
+En este cuaderno vamos a trabajar en ampliar el modelo de intercepto aleatorio que hemos definido previamente. Para ello, vamos a explorar cómo podemos especificar varios efectos aleatorios, pendientes aleatorias y modelar otro tipo de complejidades.
+
+Para ello, cargamos toda la información de la sesión anterior, y los paquetes necesarios:
+
+```{r}
+load(file = "../R/primeros_pasos.RData")
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("lme4",  ## paquete principal para realizar los análisis
+               "lmerTest", ## añade p-values e intervalos de confianza a lme4
+               "tidyverse", ## paquete general para los data pipelines
+               "easystats", ## conjunto de paquetes para reporting, analizar modelos, etc.
+               "sjPlot", ## paquete para visualizar modelos y crear tablas
+               "emmeans", ## paquete para realizar contrastes
+               "equatiomatic", ## paquete para escribir ecuaciones
+               "ggh4x", ## añade opciones visuales a ggplot
+               "ggrepel",  ## añade etiquetas a los gráficos
+               "gamm4",
+               
+               "pbkrtest",
+               "merDeriv",
+               "patchwork"
+               ) ## modelos aditivos generalizados
+```
+
+## Modelo de pendientes aleatorias
+
+En este punto, vamos a comenzar con el modelado más realista de nuestros datos. No tiene mucho sentido asumir que la relacción entre la expectativa de vida y el año es similar para Noruega que para Zambia. Por ello, vamos a estimar un coeficiente de regresión de la pendiente específico para cada país, pero con partial pooling. Vamos, un modelo de pendientes aleatorias.
+
+Ahora esperamos observar un parámetro adicional en la matriz de varianzas - covarianzas, así como la correlación entre las varianzas asociadas a cada término aleatorio.
+
+```{r}
+mod_4_rs <- lmer(?????)
+summary(mod_4_rs)
+```
+
+Podemos comprobar como se incorpora el nuevo término a la ecuación....
+
+```{r, results = "asis"}
+???(mod_4_rs)
+```
+
+De nuevo, podemos comprobar si el modelo cumple con los supuestos, y si mejora el ajuste con respecto al modelo previo.
+
+```{r}
+???(???)
+```
+
+```{r}
+???(???, ???)
+```
+
+En un artículo, es común reportar el modelo nulo, el modelo de intercepto aleatorio con los predictores elegidos y el modelo de pendientes aleatorias. Podemos obtener todos a la vez con la función que hemos visto previamente.
+
+```{r}
+tab_mod_4_rs <- tab_model(
+                          mod_2_ri_null,
+                          mod_3_ri_pred,
+                          mod_4_rs, 
+                          title = "Modelo nulo, RI and RS",
+                          file = "tres_modelos.doc")
+tab_mod_4_rs
+```
+
+Ahora podemos comprobar cómo obtenemos, para cada país y año, las desviaciones del intercepto global y de la pendiente de regresión global. Si queremos ver estas variaciones podemos utilizar la siguiente función:
+
+```{r}
+estimate_grouplevel(mod_4_rs) %>% 
+  plot()
+```
+
+O si queremos la versión no centrada, sino sumada a los valores de los efectos fijos...
+
+```{r}
+???(???)$country
+```
+
+Por último, vamos a ver qué ocurre con las prediciones que podemos realizar a través de este modelo.
+
+```{r}
+plot(????(mod_4_rs, 
+               type = "random", 
+               terms = c("year_within","country [sample = 9]"),
+               add.data = TRUE, 
+               ci = FALSE))
+```
+
+Además, podemos seguir la estrategia que vimos en el script anterior, y buscamos ver las predicciones para cada país y confrontarla con los datos reales.
+
+```{r}
+newdata_mod4 <- expand_grid(???? = countries$country,
+                            year_within =????) %>% 
+  left_join(countries, by = "country")
+
+pred_mod4 <- mod_4_rs %>%
+  ???(newdata = newdata_mod4) %>% 
+  bind_cols(., newdata_mod4) %>% 
+  rename(pred = "...1") %>% 
+  mutate(year_within = year_within + 27 + 1952) 
+
+fig5 <- ggplot(pred_mod4, 
+               aes(x = year_within, 
+                   y = pred)) +
+  geom_point(
+    data = data, 
+    aes(y = lifeExp,
+        x = year_orig), 
+    color = "grey50", 
+    size = 3, 
+    alpha = 0.5) +
+  geom_smooth(method = "lm",
+              col = "blue", 
+              se = T)+
+  labs(title = "Tendencia global con pooling completo",
+       subtitle = "lifeExp ~ year",
+       x = NULL, 
+       y = "Expectativa de vida predicha") +
+  guides(fill = "none") +
+  facet_nested_wrap(vars(continent, country), nrow = 2) +
+  theme_bw()
+```
+
+## Modelo de pendientes aleatorias con dos factores aleatorios.
+
+Hasta ahora hemos investigado el efecto fijo y aleatorio que tiene los cambios temporales en la expectativa de vida, controlando por el promedio de cada país. Sin embargo, cabría preguntarse si existen otros efectos específicos que existieran asociados a un determinado año (e.g., COVID-19), y que no hayamos tenido en cuenta. Para ello, añadimos un efecto de intercepto aleatorio al año que tenga en cuenta dichos efectos promedios...
+
+Podemos realizar este cálculo porque tenemos un modelo de factores *cruzados*. Esto se debe a que tanto el año como el país afectan a la expectativa de vida de manera "simultánea". Es decir, tienen un efecto cruzado sobre la expectativa de vida.
+
+Los efectos cruzados se especifican de manera muy sencilla en lme4. Lo único que hay que tener en cuenta es qué variable indicamos dentro del efecto cruzado. En este caso, utilizamos la variable sin centrar (la varianza de una variable centrada en el clúster en el nivel 2 es igual a 0). Por ejemplo, si queremos añadir un efecto cruzado, podemos hacerlo de la siguiente manera:
+
+```{r}
+mod_5_rs_two <- lmer(?????)
+summary(mod_5_rs_two)
+```
+
+Observamos la definición matemática del modelo,
+
+```{r, results = "asis"}
+extract_eq(mod_5_rs_two, wrap = T)
+```
+
+y los parámetros del modelo (comparados con el modelo previo):
+
+```{r}
+compare_parameters(mod_4_rs, mod_5_rs_two)
+```
+
+En este punto, vamos a utilizar una nueva función para obtener información clave de la estructura de efectos aleatorios:
+
+```{r}
+random_parameters(mod_5_rs_two)
+```
+
+Pero antes de interpretar el modelo, es prioritario comparar si el ajuste del modelo mejora cuando incluímos estos nuevos parámetros. De no ser así, podríamos pensar en reducir la complejidad del modelo, particularmente si los parámetros comunes entre ambos son similares. En este caso, parece que la complejidad adicional no es necesaria para modelar estos datos.
+
+Si comparamos el ajuste...¿qué podemos observar? (fijarse en los valores y los intervalos de confianza).
+
+```{r}
+???(???, ????)
+```
+
+## Modelo con factores anidados
+
+¿Y si nuestro modelo tuviera un factor que fuera *anidado* y no cruzado, como en el caso anterior? Como hemos visto, lme4 no distingue bien la sintaxis de ambos casos, y "permite" estimar modelos que no se corresponden con la estructura de nuestros datos. Recordad que una estrategia simple pero eficaz para evitar errores es hacer únicos los códigos que distinguen las unidades del nivel inferior.
+
+En nuestra base de datos, tenemos factores anidados que podemos estudiar y poner de ejemplo. Por ejemplo, tenemos países anidados en continentes (i.e., Sierra Leona no está en América, ni Argentina en Europa). Además, cada uno de estos países tiene un identficador único que evita que hayan errores. Para especificar este modelo, la alternativa más sencilla es ....
+
+```{r}
+mod_6_rs_nested <- lmer(lifeExp ~ year_within + (1|year) + (????), 
+                      data = data)
+summary(mod_6_rs_nested)
+```
+
+en este caso, estamos calculando cuánto difieren, en promedio, los contienentes, una vez tenido en cuenta el resto de los efectos del modelo. Quizás es más claro viendo las fórmulas.
+
+```{r, results = "asis"}
+extract_eq(mod_6_rs_nested, wrap = T)
+```
+
+¿Y si quisiéramos obtener los efectos aleatorios obtenidos?
+
+```{r}
+????(mod_6_rs_nested)
+```
+
+De nuevo, debemos decidir si merece la pena (en términos de ajuste y varianza explicada) incluir este nuevo término en la descomposición de la varianza.
+
+```{r}
+compare_performance(mod_5_rs_two, mod_6_rs_nested)
+```
+
+## Modelo con factores contextuales
+
+Un aspecto que hemos tocado ligeramente es añadir efectos contextuales a nuestro modelo. Este efecto "contextual" refleja variabilidad a nivel inter-grupos, que hasta ahora no hemos considerado. Y esto se debe a que nuestro predictor principal había sido centrado por grupos, eliminando así toda variabilidad entre ellos que pudiera haber.
+
+Para poder analizar un efecto contextual, únicamente tenemos que añadir la variable centrada por la media global a nuestro análisis. En este caso, vamos a utilizar la variable de GDP para realizar los análisis, ya que no es posible realizarlo con tiempo (al ser una constante en el segundo nivel producto de los intervalos iguales utilizados).
+
+```{r}
+mod_7_ri_context <- lmer(lifeExp ~ ?????+ (1 | country), 
+                      data = data)
+summary(mod_7_ri_context)
+```
+
+Lme4 nos devuelve un warning que nos avisa que podemos estandarizar las variables para mejorar la optimización del algoritmo. Esto es sencillo de realizar.
+
+```{r}
+data <- data %>% 
+  mutate(gdpPercap_within_z = standardize(gdpPercap_within),
+         gdpPercap_between_z = standardize(gdpPercap_between))
+
+mod_7_ri_context <- lmer(lifeExp ~ gdpPercap_within_z+ gdpPercap_between_z + (1 | country), 
+                      data = data)
+summary(mod_7_ri_context)
+```
+
+De nuevo, podemos añadir un mayor realismo o complejidad a este modelo añadiendo pendientes aleatorias, de tal modo que permitamos que el efecto de las diferencias en GDP a través del tiempo sobre un país en la expectativa de vida varíe de país en país.
+
+```{r}
+mod_7_rs_context <- lmer(?????????)
+summary(mod_7_rs_context)
+```
+
+De nuevo, podemos comprobar si la complejidad añadida del modelo está justificada por la ganancia en ajuste...
+
+```{r}
+compare_performance(mod_7_ri_context, mod_7_rs_context)
+```

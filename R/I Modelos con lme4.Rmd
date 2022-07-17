@@ -1,0 +1,500 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Este cuaderno contiene nuestros primeros pasos realizando análisis linear mixto En el mismo, vamos a utilizar una estrategia bottom-up para construir un modelo de regresión, explorar su ajuste, y aprender como informar de los resultados del mismo.
+
+Todos los ejemplos se realizarán con la base de datos "Ejemplo 4 gapminder.csv". Este ejemplo está adaptado del siguiente blog de [Andrew Heiss](https://www.andrewheiss.com/blog/2021/11/10/ame-bayes-re-guide/), adaptado a la sintaxis de lme4 y con contenido adicional.
+
+La base de datos ha sido obtenida del paquete *gapminder*. Esta base de datos contiene datos de 1952 a 2007 de 140 países, dividos por año, país y continente. En la misma, vamos a analizar la siguiente información:
+
+1)  lifeExp = expectativa de vida
+2)  pop = población
+3)  gdpPercap = producto interior bruto per cápita (en miles de millones)
+4)  gdpPercap_log = logaritmo producto interior bruto per cápita (en miles de millones)
+
+
+Cargamos los paquetes necesarios para poder realizar los cálculos.
+
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("lme4",  ## paquete principal para realizar los análisis
+               "lmerTest", ## añade p-values e intervalos de confianza a lme4
+               "tidyverse", ## paquete general para los data pipelines
+               "easystats", ## conjunto de paquetes para reporting, analizar modelos, etc.
+               "sjPlot", ## paquete para visualizar modelos y crear tablas
+               "emmeans", ## paquete para realizar contrastes
+               "equatiomatic", ## paquete para escribir ecuaciones
+               "ggh4x", ## añade opciones visuales a ggplot
+               "ggrepel",  ## añade etiquetas a los gráficos
+               "gamm4",
+               
+               "svglite", ## svg graphics
+               "ggeffects" ## compute conditional effects
+               )
+```
+
+
+```{r}
+data_full <- read_csv('https://raw.githubusercontent.com/edugargar/Curso_AEMCCO_2022_MML/main/datasets/csv/Ejemplo%204%20gapminder.csv?token=GHSAT0AAAAAABVFWG2L7GUE2PTD27G5IL6SYWN77EQ')
+```
+
+## Evolución de la expectativa de vida según país y año (datos completos)
+
+```{r}
+f1 <- ggplot(data_full, 
+             aes(x = year_orig, 
+                 y = lifeExp, 
+                 group = country, 
+                 color = continent)) +
+  geom_line(aes(size = highlight)) +
+  geom_smooth(method = "lm", 
+              aes(color = NULL, group = NULL), 
+              color = "black", 
+              size = 2,
+              se = FALSE, 
+              show.legend = FALSE) +
+  geom_label_repel(data = filter(data_full, 
+                                 year == 0, 
+                                 highlight == TRUE), 
+                   aes(label = country), direction = "y", size = 3, seed = 1234, 
+                   show.legend = FALSE) +
+  annotate(geom = "label", 
+           label = "Global trend", 
+           x = 1952, 
+           y = 50,
+           size = 4, 
+           color = "black") +
+  scale_size_manual(values = c(0.075, 1), 
+                    guide = "none") +
+  labs(x = NULL, y = "Life expectancy", color = "Continent") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+ggsave(file="fig1.svg", plot=f1, width=10, height=8)
+```
+
+# Preprocesamiento de la información
+
+Seleccionamos los países que nos interesan para realizar los análisis. Hemos seleccionado tres países por continente para poder realizar análisis de más niveles si estamos interesados. ¡Puedes probar a seleccionar tus propios países! (*cuidado: puede generar problemas de convergencia*)
+
+```{r}
+
+countries <- tribble(
+  ~country,~continent,
+  "Morocco","Africa",
+  "Zambia", "Africa",
+  "Sierra Leone", "Africa",
+  "Vietnam","Asia",
+  "China","Asia",
+  "Pakistan", "Asia",
+  "Argentina","Americas",
+  "Canada","Americas",
+  "Panama", "Americas",
+  "Spain","Europe",
+  "Norway","Europe",
+  "Croatia", "Europe"
+)
+data <- data_full[data_full$country %in% countries$country,]
+
+```
+
+## Centramos los predictores.
+
+En este caso, vamos a utilizar una estrategia de centrado por media del grupo para las variables del primer nivel. Además, calculamos las variables contextuales correspondientes (mismas variables centradas por la media global). En este caso, no estandarizamos la variable dependiente para facilitar la interpretación de los resultados en años, no en desviaciones típicas.
+
+```{r}
+centered_vars <- demean(data, select = c("year", "gdpPercap"), group = "country")
+data <- cbind(data, centered_vars)
+```
+
+# Modelos regresión lineales sin efectos aleatorios
+
+Vamos a establecer un primer modelo de comparativa con el que establecer un baseline para ir construyendo nuestra estrategia bottom-up. En este caso, por fines ilustrativos, vamos a comenzar con un modelo de regresión de complete pooling (modelo sin tener en cuenta el país) y un modelo donde asignamos un valor de regresión diferente a cada país sin compartir información (no pooling).
+
+```{r}
+mod_1_no_pooling <- lm(lifeExp ~ year + country, data = data)
+mod_1_complete_pooling <- lm(lifeExp ~ year, data = data)
+summary(mod_1_no_pooling)
+summary(mod_1_complete_pooling)
+```
+
+Si queremos, podemos solicitar ver las ecuaciones asociadas con el primer modelo:
+
+```{r, results = "asis"}
+extract_eq(mod_1_no_pooling, wrap = T)
+```
+
+Y nuestro segundo modelo sería:
+
+```{r, results = "asis"}
+extract_eq(mod_1_complete_pooling, wrap = T)
+```
+
+Vamos a examinar este modelo utilizando las funciones incluídas en los diferentes paquetes del universo *easystats*. Estas funciones son muy recomendadas. En este curso, voy a mostrarlas con las opciones por defecto, pero recomiendo encarecidamente dedicar el tiempo a estudiar cada una por separado y encontrar la información que sea más de interés en cada caso.
+
+Estas funciones son muy útiles ya que vamos a poder adaptarlas a multitud de casos diferentes en modelos lineales (y generalizados). Por ejemplo, un elemento de interés es obtener los parámetros del modelo.
+
+```{r}
+model_parameters(mod_1_complete_pooling)
+```
+
+Si queremos obtener un gráfico rápido de los mismos, podemos utilizar el método plot() asociado a esta función. ¿Hay diferencias entre el efecto de año en ambos casos?
+
+```{r}
+model_parameters(mod_1_no_pooling) %>% plot()
+```
+
+Si queremos comprobar si existen diferencias, hay una función llamada *compare_performance* que realiza esta función por nosotros.
+
+```{r}
+compare_parameters(mod_1_complete_pooling, mod_1_no_pooling)
+```
+
+Una de las cuestiones que vamos a estar más interesados en comprobar es si los supuestos estadísticos del modelo cumplen. Para ello, la función *check_model* va a jugar un papel muy importante. ¿Observamos desviaciones importantes de los supuestos?
+
+```{r}
+check_model(mod_1_no_pooling)
+```
+
+Por último, un aspecto que va a resultar clave es el hecho de poder extraer los estadísticos de ajuste de cualquier modelo, y poder realizar comparaciones entre estos. Para ello, podemos utilizar las funciones *performance* y *compare_performance* respectivamente. Si queremos observar el ajuste de un modelo...
+
+```{r}
+performance(mod_1_complete_pooling)
+```
+
+Y si queremos ver si merece la peña añadir páis como predictor, podríamos comparar ambos modelos de la siguiente manera..
+
+```{r}
+compare_performance(mod_1_complete_pooling, mod_1_no_pooling)
+```
+
+Por último, vamos a intentar facilitarnos la vida a la hora de examinar y escribir nuestros modelos. Existen multitud de paquetes que nos permiten obtener una tabla en estilo APA de un modelo de regresión. En particular, paquetes como *stargazer* o *gt* nos dan un control completo del output. Sin embargo, para un apaño bastante decente y rápido, la función *tab_model* de sjPlot es nuestra mejor amiga:
+
+```{r}
+tab_mod_1_no <- tab_model(mod_1_complete_pooling, mod_1_no_pooling, 
+                          show.std = TRUE,
+                          title = "non-mixed linear models",
+                          file = "linear.doc")
+tab_mod_1_no
+```
+
+Bonus: si queremos inspirarnos a la hora de interpretar los resultados del modelo, podemos utilizar la función *report* para obtener una idea original de qué información ofrecer de nuestros resultados:
+
+```{r}
+report(mod_1_no_pooling)
+```
+
+## Examinando la calidad de los modelos
+
+Podemos obtener de manera sencilla los valores marginales y predichos para nuestros efectos de interés. Para ello, podemos hacer los cálculos a mano, o utilizar el paquete *ggeffects*. En concreto, si queremos examinar un efecto fijo, podemos usar la siguiente rutina.
+
+```{r}
+plot(ggpredict(mod_1_complete_pooling))
+plot(ggpredict(mod_1_no_pooling))
+```
+
+En este punto, estamos interesados en ver qué predicciones nos realiza cada unos de los modelos. Para ello, vamos a generar una matriz de datos con las combinaciones de año - país posible, y estimar los valores predichos en cada caso.
+
+```{r}
+new_data <- expand_grid(country = countries$country, 
+                        year = unique(data$year))
+
+pred_model_no_pooling <- mod_1_no_pooling %>%
+  predict.lm(newdata = new_data) %>% 
+  bind_cols(., new_data) %>% 
+  rename(pred = "...1") %>% 
+  mutate(year = year + 1952) %>% 
+  left_join(countries, by = "country")
+
+pred_model_complete_pooling <- mod_1_complete_pooling %>%
+  predict.lm(newdata = new_data) %>% 
+  bind_cols(., new_data) %>% 
+  rename(pred = "...1") %>% 
+  mutate(year = year + 1952) %>% 
+  left_join(countries, by = "country")
+```
+
+Observamos visualmente las predicciones para el modelo general, en el que estimamos la misma relacción entre año y expectativa de vida para todos los países:
+
+```{r}
+fig2 <- ggplot(pred_model_complete_pooling, 
+       aes(x = year, 
+           y = pred)) +
+  geom_point(
+             data = data, 
+             aes(y = lifeExp,
+                 x = year_orig), 
+             color = "lightblue", 
+             size = 3, 
+             alpha = 0.5) +
+  geom_smooth(method = "lm",
+              col = "blue", 
+              se = T)+
+  labs(title = "Tendencia global complete pooling",
+       subtitle = "lifeExp ~ year",
+       x = NULL, 
+       y = "Expectativa de vida predicha") +
+  guides(fill = "none") +
+  facet_nested_wrap(vars(continent, country), nrow = 2) +
+  theme_bw()
+
+fig2
+```
+
+Observamos visualmente las predicciones para el modelo general, en el que estimamos la misma relacción entre año y expectativa de vida para todos los países:
+
+```{r}
+fig3 <- ggplot(pred_model_no_pooling, 
+       aes(x = year, 
+           y = pred)) +
+  geom_point(
+             data = data, 
+             aes(y = lifeExp,
+                 x = year_orig), 
+             color = "lightblue", 
+             size = 3, 
+             alpha = 0.5) +
+  geom_smooth(method = "lm",
+              col = "blue", 
+              se = T)+
+  labs(title = "Tendencia global no pooling",
+       subtitle = "lifeExp ~ year",
+       x = NULL, 
+       y = "Expectativa de vida predicha") +
+  guides(fill = "none") +
+  facet_nested_wrap(vars(continent, country), nrow = 2) +
+  theme_bw()
+
+fig3
+```
+
+# Primeros pasos multinivel
+
+## Modelo nulo
+
+Cómo hemos visto en la parte teórica, lo ideal sería seguir una estrategia maximalista, donde comenzásemos con la estructura más compleja posible, y fuéramos buscando la estructura más amplia que podamos ajustar. Sin embargo, por motivos didácticos (y porque es lo más común en la literatura), vamos a seguir la estregia contraria.
+
+El primer modelo que vamos a ajustar va a ser un modelo nulo de intercepto aleatorio, donde estimemos la desviaciones de cada país con respecto a la media global. En este primer modelo nulo todavía no vamos a incluir el efecto del año, ya que simplemente queremos establecer un baseline con el que entender mejor la descomposición de la varianza de expectativa de vida.
+
+```{r}
+mod_2_ri_null <- lmer(????)
+summary(mod_2_ri_null)
+```
+
+Si queremos ver las ecuaciones asociadas al modelo, podemos solicitarlas como...
+
+```{r, results = "asis"}
+??(mod_2_ri_null)
+```
+
+En este primer caso, no vamos a inspeccionar los parámetros, ni el ajuste, ya que no son particularmente de interés. Lo que más nos interesa en este modelo, es comprobar el coeficiente de correlación intraclase. Aunque podemos obtenerlo con la función *performance*, el output de la función *icc* es más detallado:
+
+```{r}
+icc(mod_2_ri_null)
+```
+
+Una des las cuestiones que nos puede interesar, es comprobar cuánto se desvía cada país de la media global. Para ello, podemos utilizar una la siguiente función específica y realizar un gráfico correspondiente:
+
+```{r}
+estimate_grouplevel(mod_2_ri_null) %>% 
+  plot()
+```
+
+En este caso, estamos obteniendo las desviaciones, y no los valores absolutos de la expectativa de vida media estimada para cada país. Para ello, tenemos que extraer los coeficientes de la variable *country* del modelo:
+
+```{r}
+coef(mod_2_ri_null)$country %>% 
+  as_tibble(rownames = "country")
+```
+
+## Modelo de intercepto aleatorio
+
+Vamos a crear un primer modelo de pooling parcial que incluya el efecto fijo del año y el efecto aleatorio de país en el modelo de regresión. En este caso, vamos a introducir la variable centrada en el grupo del año, para que el coeficiente refleje desviaciones del año promedio (si lo comparamos con el modelo sin centrar, veremos únicamente cambia el intercepto general).
+
+```{r}
+mod_3_ri_pred <- lmer(???), data = data)
+summary(mod_3_ri_pred)
+```
+
+Observamos que la ecuación del modelo refleje el model que estábamos buscado:
+
+```{r, results = "asis"}
+extract_eq(mod_3_ri_pred)
+```
+
+Además, ya deberíamos entender qué vamos a obtener como output en cada una de las siguientes funciones. ¿Lo recordamos?
+
+```{r}
+model_parameters(mod_3_ri_pred) %>% 
+  plot()
+```
+
+```{r}
+check_model(mod_3_ri_pred)
+```
+
+```{r}
+report(mod_3_ri_pred)
+```
+
+Podemos comparar el modelo de intercepto aleatorio vs el modelo nulo para comprobar si merece la pena añadir año como predictor:
+
+```{r}
+???(mod_2_ri_null, mod_3_ri_pred)
+```
+
+En estos casos, cobra especial importancia el escribir automáticamente las tablas de nuestros modelos, ya que si no tendremos que buscar mucha información por separado y perder tiempo haciendo copy-paste
+
+```{r}
+tab_mod_3_ri_pred <- tab_model(mod_1_complete_pooling,
+                               mod_2_ri_null,
+                               mod_3_ri_pred, 
+                               title = "Linear model and null-model",
+                               file = "linear.doc")
+```
+
+Si queremos ver los coeficientes del modelo (ya sumados a la media global en el caso del efecto aleatorio), podemos obtenerlo como antes. Cómo vemos, el efecto del año en cada país se mantiene constante y común para todos ellos:
+
+```{r}
+coef(mod_3_ri_pred)$country %>% 
+  as_tibble(rownames = "country")
+```
+
+Vamos a examinar las predicciones realizadas por el modelo. Para poder tener en cuenta la varianza del factor aleatorio, debemos indicárselo como tal a la función *ggpredict*.
+
+```{r}
+plot(ggpredict(mod_3_ri_pred, type = "random"))
+plot(ggpredict(mod_3_ri_pred, type = "random", condition = c(country ="Spain")))
+plot(ggpredict(mod_3_ri_pred, type = "random", condition = c(country ="Argentina")))
+```
+
+```{r}
+plot(ggpredict(mod_3_ri_pred, 
+               type = "random", 
+               terms = c("year_within","country [sample =9]"),
+               add.data = TRUE, 
+               ci = FALSE))
+
+```
+
+Una manera de validar el modelo es observando los efectos marginales estimados. Para ello, vamos a utilizar el paquete *emmeans* que nos permite incorporar la estructura de efectos aleatorios a la hora de calcular los mismos. Por ejemplo, vamos a calcular qué ocurre con un la expectativa de vida a -10, 0 y 10 años (desde la media grupal).
+
+```{r}
+mod_3_ri_pred %>% 
+  emmeans(~  year_within,
+          at = list(year_within = c(-10, 0, 10)),  # Look at predicted values for 1952
+          re_formula = NULL)  # Incorporate random effects --> NULL include all terms
+```
+
+Otra manera alternativa es, como vimos antes, realizando predicciones con el modelo estimado. Para ello, vamos reutilizar el código anterior y observar si nuestras predicciones han mejorado...
+
+```{r}
+newdata_mod3 <- expand_grid(country = countries$country,
+                            year_within = unique(data$year_within)) %>% 
+  left_join(countries, by = "country")
+
+pred_mod3 <- mod_3_ri_pred %>%
+  predict(newdata = newdata_mod3) %>% 
+  bind_cols(., newdata_mod3) %>% 
+  rename(pred = "...1") %>% 
+  mutate(year = year_within + 27 + 1952) 
+
+fig4 <- ggplot(pred_mod3, 
+       aes(x = year, 
+           y = pred)) +
+  geom_point(
+    data = data, 
+    aes(y = lifeExp,
+        x = year_orig), 
+    color = "grey50", 
+    size = 3, 
+    alpha = 0.5) +
+  geom_smooth(method = "lm",
+              col = "blue", 
+              se = T)+
+  labs(title = "Tendencia global con pooling completo",
+       subtitle = "lifeExp ~ year",
+       x = NULL, 
+       y = "Expectativa de vida predicha") +
+  guides(fill = "none") +
+  facet_nested_wrap(vars(continent, country), nrow = 2) +
+  theme_bw()
+
+fig4
+```
+
+# Bonus: Efectos del shrinkage en parámetros
+
+```{r}
+
+complete_pooling <-
+  data.frame(
+    country = unique(data$country),
+    Intercept = mod_1_complete_pooling$coefficients[1],
+    year = mod_1_complete_pooling$coefficients[2],
+    model = "complete_pooling")
+
+no_pooling <-
+  lme4::lmList(lifeExp ~ year|country, data = data) %>%
+  coef() %>%
+  rownames_to_column("country") %>%
+  mutate(model = "no pooling") %>%
+  rename(Intercept = `(Intercept)`)
+
+partial_pooling <- 
+  data.frame(
+  country = unique(data$country),
+  Intercept = coef(mod_3_ri_pred)$country[1],
+  year = coef(mod_3_ri_pred)$country[2],
+  model = "partial pooling") %>% 
+  rename(Intercept = X.Intercept.,
+         year = year_within)
+
+rownames(partial_pooling) <- NULL
+
+shrinkage <- bind_rows(no_pooling, partial_pooling)
+
+###########################################################################################
+# Helper function to make ellipse, credits to Tristan Mahr
+# https://tjmahr.github.io/plotting-partial-pooling-in-mixed-effects-models/
+##################################################################################
+
+shrinkage %>%
+  ggplot(aes(x = Intercept, 
+             y = year, 
+             color = model) ) +
+  scale_color_ordinal(begin = 1, end = 0)+
+  geom_path(aes(group = country, color = NULL), show.legend = FALSE ) +
+  ggrepel::geom_text_repel(
+    aes(label = country, color = NULL),
+    data = no_pooling, show.legend = FALSE
+  ) +
+  geom_point(size = 2, show.legend = TRUE) +
+  geom_point(
+    data = complete_pooling,
+    aes(x = Intercept, 
+        y = year),
+    size = 2, color = "red",
+    show.legend = FALSE, inherit.aes = FALSE
+  ) +
+  coord_cartesian(
+    xlim = c(min(shrinkage$Intercept), max(shrinkage$Intercept) ),
+    ylim = c(min(shrinkage$year), max(shrinkage$year) ),
+    expand = TRUE) +
+  theme_bw(base_size = 10)
+```
+
+
+Guardamos toda la información de la sesión y nos preparamos para el siguiente capítulo.
+
+```{r}
+save(data,
+     countries,
+     complete_pooling,
+     no_pooling,
+     mod_2_ri_null,
+     mod_3_ri_pred,
+     file = "../R/primeros_pasos.RData")
+```
